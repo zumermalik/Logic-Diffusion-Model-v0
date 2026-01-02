@@ -1,5 +1,6 @@
-torch
-diffusers
-transformers
-accelerate
-huggingface_hub
+torch>=2.0.0
+numpy
+tqdm
+gradio>=4.0.0  # For the web interface in app.py
+matplotlib     # For plotting results (if needed)
+diffusers      # Optional, but good to have for comparison
