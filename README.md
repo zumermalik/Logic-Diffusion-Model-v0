@@ -1,10 +1,10 @@
 ```markdown
 # 🧠 Logic Diffusion v0
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Python](https://img.shields.io/badge/python-3.8%2B-green)
-![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange)
-![Status](https://img.shields.io/badge/status-research--prototype-yellow)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)
+[![Python](https://img.shields.io/badge/python-3.8%2B-green)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange)
+[![Status](https://img.shields.io/badge/status-research--prototype-yellow)
 
 **Logic Diffusion** is a neuro-symbolic generative architecture designed to address bias in deep learning distributions.
 
