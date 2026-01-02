@@ -1,51 +1,69 @@
 import torch
-from diffusers import DDPMPipeline
+import numpy as np
 from tqdm import tqdm
+from .logic import DifferentiableLogic
 
-class LogicGuidedPipeline(DDPMPipeline):
-    def __init__(self, unet, scheduler, logic_module):
-        super().__init__(unet, scheduler)
-        self.logic_module = logic_module
+class LogicGuidedPipeline:
+    """
+    Manages the diffusion sampling process and injects 
+    Logical Guidance to steer generation.
+    """
+    def __init__(self, model, config, scheduler=None):
+        self.model = model
+        self.cfg = config
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model.to(self.device)
+        
+        # Simple Linear Noise Scheduler
+        self.beta = torch.linspace(config.beta_start, config.beta_end, config.timesteps).to(self.device)
+        self.alpha = 1. - self.beta
+        self.alpha_hat = torch.cumprod(self.alpha, dim=0)
 
-    @torch.no_grad()
-    def __call__(
-        self, 
-        batch_size=1, 
-        generator=None, 
-        num_inference_steps=1000, 
-        logic_guidance_scale=10.0  # How hard we force the logic
-    ):
-        # 1. Sample initial noise
-        image_shape = (batch_size, self.unet.config.in_channels, self.unet.config.sample_size, self.unet.config.sample_size)
-        image = torch.randn(image_shape, generator=generator, device=self.device)
-
-        # 2. Set timesteps
-        self.scheduler.set_timesteps(num_inference_steps)
-
-        # 3. Denoising Loop
-        for t in tqdm(self.scheduler.timesteps):
-            # A. Predict noise residual (Standard Diffusion)
-            with torch.no_grad():
-                model_output = self.unet(image, t).sample
-
-            # B. --- THE LOGIC STEP ---
-            # We need gradients for the input 'image' to steer it.
-            # We must enable grad temporarily even though we are in no_grad mode
-            with torch.enable_grad():
-                x_in = image.detach().requires_grad_(True)
+    def sample(self, n_samples, constraints=[]):
+        """
+        Generate samples with Logic Guidance.
+        """
+        self.model.eval()
+        with torch.no_grad():
+            # Start from random noise
+            x = torch.randn((n_samples, self.cfg.channels, self.cfg.image_size, self.cfg.image_size)).to(self.device)
+            
+            for i in tqdm(reversed(range(1, self.cfg.timesteps)), position=0):
+                t = (torch.ones(n_samples) * i).long().to(self.device)
                 
-                # Calculate how much we violate the logic
-                logic_loss = self.logic_module(x_in)
+                # 1. Predict noise
+                predicted_noise = self.model(x, t)
                 
-                # Calculate gradient: "Which direction moves us closer to the Logical Manifold?"
-                logic_grad = torch.autograd.grad(logic_loss, x_in)[0]
+                # 2. Logic Guidance Step (The Innovation)
+                # If we have constraints and are in the guidance phase
+                if constraints and i < self.cfg.logic_start_step:
+                    # We must enable gradients momentarily for the logic loss
+                    with torch.enable_grad():
+                        x_in = x.detach().requires_grad_(True)
+                        
+                        # Calculate Logic Loss on the current noisy image
+                        # (Note: In v1 we will project x_in to x_0 estimate first)
+                        loss = 0
+                        for constraint in constraints:
+                            loss += constraint(x_in)
+                        
+                        # Calculate gradient of Logic Loss w.r.t pixels
+                        grad = torch.autograd.grad(loss, x_in)[0]
+                        
+                        # Subtract gradient (Steer away from bias)
+                        # This "pushes" the noise toward the fair manifold
+                        predicted_noise = predicted_noise - (self.cfg.logic_weight * grad)
 
-            # C. Apply Guidance
-            # We modify the estimated noise to include the logic correction
-            # Effectively: pred_noise = pred_noise + (scale * logic_gradient)
-            guided_output = model_output - (logic_guidance_scale * logic_grad)
-
-            # D. Compute previous noisy sample x_{t-1}
-            image = self.scheduler.step(guided_output, t, image).prev_sample
-
-        return image
+                # 3. Denoise (Standard DDPM Update)
+                alpha = self.alpha[i]
+                alpha_hat = self.alpha_hat[i]
+                beta = self.beta[i]
+                
+                if i > 1:
+                    noise = torch.randn_like(x)
+                else:
+                    noise = torch.zeros_like(x)
+                
+                x = (1 / torch.sqrt(alpha)) * (x - ((1 - alpha) / (torch.sqrt(1 - alpha_hat))) * predicted_noise) + torch.sqrt(beta) * noise
+                
+        return x.detach().cpu()

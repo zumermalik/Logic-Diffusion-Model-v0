@@ -1,60 +1,80 @@
 import torch
 import torch.nn as nn
+from typing import Callable
 
-class DifferentiableLogic(nn.Module):
+class DifferentiableLogic:
     """
-    Implements a differentiable logic layer.
-    Uses Product T-Norms to relax boolean logic into continuous gradients.
+    Library of differentiable fuzzy logic operators (T-Norms).
+    Allows logical rules to be used as loss functions.
     """
-    def __init__(self):
-        super().__init__()
-
-    def and_op(self, x, y):
-        return x * y
-
-    def or_op(self, x, y):
-        return x + y - (x * y)
-
-    def not_op(self, x):
+    
+    @staticmethod
+    def not_op(x: torch.Tensor) -> torch.Tensor:
+        """Standard Negation: 1 - x"""
         return 1.0 - x
 
-    def implies_op(self, x, y):
-        # x -> y  is equivalent to  not(x) or y
-        return self.or_op(self.not_op(x), y)
-
-class AxiomaticConstraint(nn.Module):
-    """
-    Defines the 'Logical Manifold' constraints.
-    Example: 'Fairness' axiom -> If Feature A is present, Feature B must be balanced.
-    """
-    def __init__(self):
-        super().__init__()
-        self.logic = DifferentiableLogic()
-
-    def forward(self, x):
+    @staticmethod
+    def and_op(x: torch.Tensor, y: torch.Tensor, method='product') -> torch.Tensor:
         """
-        Input: x (The generated tensor during diffusion)
-        Output: logic_loss (Scalar tensor, 0.0 means logic is perfectly satisfied)
+        Logical AND (Conjunction).
+        - 'product': x * y (Best gradients)
+        - 'godel': min(x, y)
         """
-        # --- EXAMPLE AXIOM: SYMMETRY & BOUNDS ---
-        # "The output must be symmetric and bounded between -1 and 1"
-        
-        # 1. Constraint: Values must be within [-1, 1] (Soft Logic)
-        # We penalize values outside this range.
-        lower_bound = torch.relu(-1.0 - x)
-        upper_bound = torch.relu(x - 1.0)
-        bound_violation = torch.mean(lower_bound + upper_bound)
-
-        # 2. Constraint: Vertical Symmetry (Example of a 'structural' logic)
-        # Left half of tensor roughly equals flipped right half
-        # Assuming x is (B, C, H, W)
-        if x.dim() == 4:
-            x_flipped = torch.flip(x, dims=[3]) 
-            symmetry_violation = torch.mean((x - x_flipped) ** 2)
+        if method == 'product':
+            return x * y
+        elif method == 'godel':
+            return torch.minimum(x, y)
         else:
-            symmetry_violation = 0.0
+            raise ValueError(f"Unknown logic method: {method}")
 
-        # Total Logic Loss (minimize this to steer towards manifold)
-        total_violation = bound_violation + symmetry_violation
+    @staticmethod
+    def or_op(x: torch.Tensor, y: torch.Tensor, method='product') -> torch.Tensor:
+        """
+        Logical OR (Disjunction).
+        Derived via De Morgan's: NOT (NOT x AND NOT y)
+        """
+        if method == 'product':
+            # x + y - xy
+            return x + y - (x * y)
+        elif method == 'godel':
+            return torch.maximum(x, y)
+        else:
+            raise ValueError(f"Unknown logic method: {method}")
+
+    @staticmethod
+    def implies(x: torch.Tensor, y: torch.Tensor, method='product') -> torch.Tensor:
+        """
+        Logical Implication (x => y).
+        CRITICAL for fairness: "If Feature A (x), Then Feature B (y)"
+        """
+        if method == 'product':
+            # Reichenbach Implication: 1 - x + xy
+            return 1.0 - x + (x * y)
+        elif method == 'godel':
+             # 1 if x <= y else y
+            return torch.where(x <= y, torch.ones_like(x), y)
+        else:
+            raise ValueError(f"Unknown logic method: {method}")
+
+class LogicConstraint(nn.Module):
+    """
+    A trainable module that calculates how much a batch of data violates a specific rule.
+    """
+    def __init__(self, rule_function: Callable, weight: float = 1.0):
+        super().__init__()
+        self.rule_function = rule_function
+        self.weight = weight
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Returns the weighted loss (violation cost).
+        Input x: The batch of generated data (or latent features).
+        """
+        # 1. Calculate Truth Value of the rule (0 to 1)
+        truth_value = self.rule_function(x)
         
-        return total_violation
+        # 2. Convert Truth to Loss (Minimize Loss = Maximize Truth)
+        # Loss = 1 - Truth
+        violation_loss = torch.mean(1.0 - truth_value)
+        
+        return self.weight * violation_loss
